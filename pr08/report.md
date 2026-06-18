@@ -2,6 +2,29 @@
 
 ## 1. Что было посажено
 
+**Что подозрительно:** Процессы запущены из скрытой папки /tmp/.hidden_malware/ с именами backdoor.sh и listener.sh, что нетипично для системных процессов. listener.sh слушает порт 4444.
+
+## 3. Что нашли — сетевые соединения
+
+**Команда:** `ss -tulnp`
+
+**Подозрительный порт:** 4444
+
+**Процесс:** listener.sh (PID: 15347)
+
+**Вывод:**
+**Команда:** `sudo lsof -i :4444`
+
+**Результат:**
+**Как lsof связывает порт с процессом:** Показывает PID (15347), имя процесса (nc/listener.sh) и то, что он слушает порт 4444. По этим данным можно найти процесс и его файл.
+
+## 4. Что нашли — автозапуск
+
+### Cron
+
+**Команда:** `crontab -l`
+
+**Вывод:**
 | Механизм | Место | Команда/файл |
 |----------|-------|-------------|
 | Cron | crontab пользователя | /tmp/.hidden_malware/backdoor.sh |
@@ -12,48 +35,65 @@
 ## 2. Что нашли — процессы
 
 **Команда:** `ps aux | grep '/tmp'`
-**Результат:** [popa     12345  0.0  0.1  12345  6789 ?  S  20:30  0:00 /bin/bash /tmp/.hidden_malware/backdoor.sh
-popa     12346  0.0  0.1  12345  6789 ?  S  20:30  0:00 /bin/bash /tmp/.hidden_malware/listener.sh]
-**Что подозрительно:** Процессы запущены из /tmp/.hidden_malware/, что нетипично для системных процессов
 
-## 3. Что нашли — сетевые соединения
+**Вывод:**
 
-**Команда:** `ss -tulnp`
-**Подозрительный порт:** 4444
-**Процесс:** listener.sh (PID: 15347)
-
-**Команда:** `sudo lsof -i :4444`
-**Результат:** [COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME
-nc      15347 popa    3u  IPv4 157349      0t0  TCP *:4444 (LISTEN)]
-**Как lsof связывает порт с процессом:** Показывает PID и имя процесса, который слушает порт, а также дескриптор файла
-
-## 4. Что нашли — автозапуск
-
-### Cron
-[crontab -l
-@reboot /tmp/.hidden_malware/backdoor.sh &
-*/5 * * * * /tmp/.hidden_malware/backdoor.sh &]
-
-[Service]
-ExecStart=/tmp/.hidden_malware/backdoor.sh
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=default.target]
-**Что подозрительно:** @reboot и */5 записи с /tmp/.hidden_malware/
+**Что подозрительно:** Задания запускаются при загрузке (@reboot) и каждые 5 минут из скрытой папки /tmp/.hidden_malware/.
 
 ### Systemd
-[[Unit]
-Description=System Helper Service
-After=default.target
 
-[Service]
-ExecStart=/tmp/.hidden_malware/backdoor.sh
-Restart=always
-RestartSec=10
+**Команда:** `systemctl --user list-unit-files --state=enabled --type=service`
 
-[Install]
-WantedBy=default.target
-]
+**Вывод:**
 **Содержимое unit-файла:**
+**Что подозрительно:** Сервис с общим описанием "System Helper Service" запускает скрипт из /tmp/.hidden_malware/, маскируясь под системный сервис.
+
+### ~/.bashrc
+
+**Команда:** `grep -n "hidden_malware\|system update helper" ~/.bashrc`
+
+**Строка которую нашли:**
+**Номер строки:** 42
+
+**Что подозрительно:** В профильный файл bashrc добавлен запуск backdoor.sh при каждом открытии терминала.
+
+### Другие места автозапуска
+
+**rc.local:**
+**ld.so.preload:**
+**~/.ssh/authorized_keys:**
+## 5. Итоговая таблица следов
+
+| Место | Инструмент обнаружения | Что нашли |
+|-------|----------------------|-----------|
+| Процессы | ps aux | backdoor.sh, listener.sh из /tmp |
+| Порт 4444 | ss -tulnp | listener.sh (nc) |
+| Файлы процесса | lsof -p PID | activity.log, backdoor.sh |
+| Cron | crontab -l | @reboot и */5 записи |
+| Systemd | systemctl --user | system-helper.service |
+| Bashrc | tail / grep | строка запуска backdoor |
+
+## 6. Связь с нормативкой (Приказ ФСТЭК №17)
+
+| Мера | Описание | Как реализована |
+|------|----------|-----------------|
+| АНЗ.2 | Обнаружение вредоносного кода | Проверка автозапуска (cron, systemd, bashrc) |
+| АУД.4 | Анализ безопасности | Проверка процессов (ps) и сетевых соединений (ss, lsof) |
+| ЗИС.17 | Управление сетевыми соединениями | Обнаружение подозрительного порта 4444 |
+
+## Выводы
+
+В ходе работы были изучены механизмы автозапуска в Linux:
+- **Cron** — задания по расписанию (@reboot, */5)
+- **Systemd** — пользовательские сервисы (~/.config/systemd/user/)
+- **Bashrc** — запуск при входе в систему
+- **RC.local** — старый способ автозапуска
+
+**Самым неочевидным местом оказался пользовательский systemd**, так как он не требует root для создания и запуска сервисов, и администраторы часто забывают его проверять.
+
+**Инструменты расследования:**
+- `ps aux` — поиск подозрительных процессов
+- `ss -tulnp` — поиск открытых портов
+- `lsof -i :порт` — связь порта с процессом
+- `crontab -l` — проверка cron-заданий
+- `systemctl --user` — проверка пользовательских сервисов
